@@ -3,7 +3,7 @@
  *******************  CANADIAN ASTRONOMY DATA CENTRE  *******************
  **************  CENTRE CANADIEN DE DONNÉES ASTRONOMIQUES  **************
  *
- *  (c) 2009, 2020                       (c) 2009, 2020
+ *  (c) 2023.                            (c) 2023.
  *  Government of Canada                 Gouvernement du Canada
  *  National Research Council            Conseil national de recherches
  *  Ottawa, Canada, K1A 0R6              Ottawa, Canada, K1A 0R6
@@ -69,19 +69,26 @@
 
 package ca.nrc.cadc.dlm.server;
 
-import ca.nrc.cadc.auth.AuthMethod;
+import ca.nrc.cadc.auth.AuthenticationUtil;
+import ca.nrc.cadc.auth.AuthorizationToken;
+import ca.nrc.cadc.cred.client.CredUtil;
+import ca.nrc.cadc.date.DateUtil;
 import ca.nrc.cadc.dlm.DownloadDescriptor;
 import ca.nrc.cadc.dlm.DownloadRequest;
-import ca.nrc.cadc.dlm.DownloadTuple;
 import ca.nrc.cadc.dlm.DownloadUtil;
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
+
+import javax.security.auth.Subject;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.security.cert.CertificateExpiredException;
+import java.security.cert.CertificateNotYetValidException;
+import java.text.DateFormat;
+import java.util.Date;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Set;
 
 
 /**
@@ -89,39 +96,49 @@ import javax.servlet.http.HttpServletResponse;
  *
  * @author adriand
  */
-public class UrlListServlet extends HttpServlet {
-    public static final String FILE_LIST_TARGET = "/urlList";
-    private static final long serialVersionUID = 202008181200L;
+public class ScriptServlet extends HttpServlet {
+    private static final long serialVersionUID = 202303151015L;
+    public static final String SCRIPT_TARGET = "/script";
+
+    private static final DateFormat DATE_FORMAT = DateUtil.getDateFormat("yyyyMMddHHmmss", DateUtil.UTC);
 
     /**
      * Handle POSTed download request from an external page.
      *
      * @param request  The HTTP Request
      * @param response The HTTP Response
-     * @throws java.io.IOException if stream processing fails
+     * @throws IOException if stream processing fails
      */
     @Override
-    protected void doPost(HttpServletRequest request, HttpServletResponse response)
-        throws  IOException {
+    protected void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
 
+        final String filename = String.format("cadc-download-%s.sh", DATE_FORMAT.format(new Date()));
         response.setContentType("text/plain");
-        response.setHeader("Content-Disposition",
-            "attachment;filename=\"cadcUrlList.txt\"");
+        response.setHeader("content-disposition", "attachment;filename=\"" + filename + "\"");
 
-        DownloadRequest downloadReq = (DownloadRequest) request.getAttribute("downloadRequest");
+        final DownloadRequest downloadReq = (DownloadRequest) request.getAttribute("downloadRequest");
         downloadReq.runID = (String) request.getAttribute("runid");
 
-        for (Iterator<DownloadDescriptor> iter = DownloadUtil.iterateURLs(downloadReq); iter.hasNext(); ) {
-            final DownloadDescriptor dd = iter.next();
+        final Subject currentSubject = AuthenticationUtil.getCurrentSubject();
+        final String authToken;
 
-            if (dd.url != null) {
-                response.getOutputStream().println(dd.url.toString());
+        try {
+            if (CredUtil.checkCredentials(currentSubject)) {
+                final Set<AuthorizationToken> tokens = currentSubject.getPublicCredentials(AuthorizationToken.class);
+                if (tokens.isEmpty()) {
+                    authToken = null;
+                } else {
+                    authToken = tokens.toArray(new AuthorizationToken[0])[0].getCredentials();
+                }
             } else {
-                response.getOutputStream().println("ERROR\t" + dd.uri + "\t"
-                    + dd.error);
+                authToken = null;
             }
-        }
 
-        response.getOutputStream().flush();
+            final ScriptGenerator scriptGenerator = new ScriptGenerator(DownloadUtil.iterateURLs(downloadReq), authToken);
+
+            scriptGenerator.generate(response.getWriter());
+        } catch (CertificateExpiredException | CertificateNotYetValidException certificateException) {
+            throw new IOException(certificateException.getMessage(), certificateException);
+        }
     }
 }
